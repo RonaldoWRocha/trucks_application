@@ -1,0 +1,43 @@
+COMO RODAR NO EASYPANEL
+
+1. Suba este projeto para um repositorio Git.
+
+Nao suba o arquivo .env. Ele contem senhas e ja esta ignorado pelo .gitignore.
+
+2. No Easypanel, crie um App Service.
+
+Source:
+- Github repository ou Custom git provider
+- O Easypanel vai encontrar o Dockerfile e construir a imagem.
+
+3. Configure as variaveis em Environment.
+
+POSTGRES_DSN="host=easypanel.kodigo.cloud port=5435 dbname=rodobach_db user=user_m4st3r password=SUA_SENHA"
+TRUCKS_API_URL=https://webservice.newrastreamentoonline.com.br/
+TRUCKS_API_LOGIN=SEU_LOGIN_TRUCKS
+TRUCKS_API_PASSWORD=SUA_SENHA_TRUCKS
+TRUCKS_MENSAGEM_MID=148725040945
+TRUCKS_TELEMETRIA_TID=1
+TRUCKS_TELEMETRIA_DIAS_ATRAS=1
+TRUCKS_MENSAGENS_INTERVAL=60
+TRUCKS_TELEMETRIA_RELATORIO_INTERVAL=300
+TRUCKS_VEICULOS_INTERVAL=86400
+TRUCKS_OCORRENCIAS_INTERVAL=86400
+
+4. Rode a criacao das tabelas uma vez.
+
+Depois do deploy, abra o Console do servico no Easypanel e execute:
+
+python trucks_postgres_ingest.py --init-db
+
+5. Deixe o servico rodando.
+
+O Dockerfile ja inicia automaticamente:
+
+python trucks_postgres_ingest.py --loop --sleep 60
+
+6. Observacoes.
+
+- Este projeto e um worker, nao um site. Nao precisa configurar dominio nem porta/proxy.
+- Use apenas uma replica, para evitar dois workers importando os mesmos dados ao mesmo tempo.
+- Acompanhe a execucao pela aba Logs do Easypanel.

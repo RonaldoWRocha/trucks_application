@@ -1,0 +1,124 @@
+COMO RODAR A INGESTAO TRUCKS -> POSTGRESQL
+
+Arquivos criados:
+
+- trucks_postgres_ingest.py
+- requirements-postgres-ingest.txt
+- .env.postgres.example
+- schema.sql
+
+1. Instalar dependencias
+
+pip install -r postgres_ingest/requirements-postgres-ingest.txt
+
+2. Configurar variaveis de ambiente
+
+Use .env.postgres.example como referencia.
+
+Variaveis obrigatorias:
+
+- POSTGRES_DSN
+- TRUCKS_API_LOGIN
+- TRUCKS_API_PASSWORD
+
+Exemplo PowerShell:
+
+$env:POSTGRES_DSN="postgresql://usuario:senha@localhost:5432/seu_banco"
+$env:TRUCKS_API_LOGIN="seu_login"
+$env:TRUCKS_API_PASSWORD="sua_senha"
+
+3. Criar schema e tabelas
+
+python postgres_ingest/trucks_postgres_ingest.py --init-db
+
+Tambem da para rodar o SQL manualmente pelo PostgreSQL:
+
+psql "postgresql://usuario:senha@localhost:5432/seu_banco" -f postgres_ingest/schema.sql
+
+Observacao:
+
+O arquivo schema.sql usa CREATE TABLE IF NOT EXISTS e CREATE INDEX IF NOT EXISTS.
+Se as tabelas principais ja existem, ele nao recria nem apaga dados.
+Nesse caso, confira se as colunas usadas pelo Python existem nelas.
+
+Isso cria:
+
+- trucks.integration_jobs
+- trucks.integration_errors
+- trucks.veiculos
+- trucks.mensagens_cb
+- trucks.ocorrencias_telemetria
+- trucks.telemetria_relatorio
+- trucks.veiculos_temp
+- trucks.veiculos_importados
+- trucks.mensagens_cb_temp
+- trucks.mensagens_cb_importados
+- trucks.ocorrencias_telemetria_temp
+- trucks.ocorrencias_telemetria_importados
+- trucks.telemetria_relatorio_temp
+- trucks.telemetria_relatorio_importados
+
+4. Rodar uma vez
+
+python postgres_ingest/trucks_postgres_ingest.py --once
+
+Rodar apenas um job:
+
+python postgres_ingest/trucks_postgres_ingest.py --once --job mensagens_cb
+python postgres_ingest/trucks_postgres_ingest.py --once --job veiculos
+python postgres_ingest/trucks_postgres_ingest.py --once --job ocorrencias_telemetria
+python postgres_ingest/trucks_postgres_ingest.py --once --job telemetria_relatorio
+
+5. Rodar continuamente
+
+python postgres_ingest/trucks_postgres_ingest.py --loop --sleep 60
+
+6. Como funciona o controle
+
+Cada job tem duas tabelas de controle:
+
+- *_temp:
+  Payloads recebidos da API que ainda precisam ser importados ou que deram erro.
+
+- *_importados:
+  Payloads que foram processados com sucesso.
+
+Fluxo:
+
+1) Consulta API da Trucks.
+2) Salva XML bruto na tabela trucks.<job>_temp.
+3) Processa XML e faz upsert nas tabelas finais.
+4) Se der certo, copia para trucks.<job>_importados e apaga da temp.
+5) Se der erro, mantem na temp com status = 'error' e last_error preenchido.
+
+Assim, se o processo cair no meio, o item continua na temp e pode ser reprocessado.
+
+7. Consultas uteis
+
+Jobs configurados:
+
+SELECT * FROM trucks.integration_jobs ORDER BY job_name;
+
+Itens com erro:
+
+SELECT 'mensagens_cb' AS job, id, attempts, last_error FROM trucks.mensagens_cb_temp WHERE status = 'error'
+UNION ALL
+SELECT 'veiculos' AS job, id, attempts, last_error FROM trucks.veiculos_temp WHERE status = 'error'
+UNION ALL
+SELECT 'ocorrencias_telemetria' AS job, id, attempts, last_error FROM trucks.ocorrencias_telemetria_temp WHERE status = 'error'
+UNION ALL
+SELECT 'telemetria_relatorio' AS job, id, attempts, last_error FROM trucks.telemetria_relatorio_temp WHERE status = 'error';
+
+Ultimos importados:
+
+SELECT imported_at, records_read, records_inserted, records_ignored
+FROM trucks.mensagens_cb_importados
+ORDER BY imported_at DESC
+LIMIT 20;
+
+Volume final:
+
+SELECT count(*) FROM trucks.mensagens_cb;
+SELECT count(*) FROM trucks.veiculos;
+SELECT count(*) FROM trucks.ocorrencias_telemetria;
+SELECT count(*) FROM trucks.telemetria_relatorio;
