@@ -79,15 +79,24 @@ def active_clients(conn, only_client=None):
                 c.schema_name,
                 ic.api_url,
                 ic.login,
-                pgp_sym_decrypt(decode(ic.password_encrypted, 'base64'), %s) as password
+                ic.password_encrypted
             FROM public.clients c
             JOIN public.integration_credentials ic ON ic.client_id = c.id
             WHERE {' AND '.join(where)}
             ORDER BY c.id
             """,
-            [APP_ENCRYPTION_KEY, *params],
+            params,
         )
-        return [
+        rows = cur.fetchall()
+
+    clients = []
+    for row in rows:
+        try:
+            password = decrypt_trucks_password(conn, row[6])
+        except Exception as exc:
+            print(f"{row[2]}: credencial Trucks invalida: {exc}")
+            continue
+        clients.append(
             {
                 "id": row[0],
                 "name": row[1],
@@ -96,10 +105,26 @@ def active_clients(conn, only_client=None):
                 "schema": quote_ident(row[3]),
                 "api_url": row[4],
                 "login": row[5],
-                "password": row[6],
+                "password": password,
             }
-            for row in cur.fetchall()
-        ]
+        )
+    return clients
+
+
+def decrypt_trucks_password(conn, encrypted):
+    with conn.cursor() as cur:
+        if str(encrypted or "").startswith("-----BEGIN PGP MESSAGE-----"):
+            cur.execute(
+                "SELECT pgp_sym_decrypt(dearmor(%s), %s)",
+                (encrypted, APP_ENCRYPTION_KEY),
+            )
+            return cur.fetchone()[0]
+
+        cur.execute(
+            "SELECT pgp_sym_decrypt(decode(%s, 'base64'), %s)",
+            (encrypted, APP_ENCRYPTION_KEY),
+        )
+        return cur.fetchone()[0]
 
 
 def text_of(node, tag):
