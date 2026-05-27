@@ -13,9 +13,7 @@ Source:
 3. Configure as variaveis em Environment.
 
 POSTGRES_DSN="host=easypanel.kodigo.cloud port=5435 dbname=rodobach_db user=user_m4st3r password=SUA_SENHA"
-TRUCKS_API_URL=https://webservice.newrastreamentoonline.com.br/
-TRUCKS_API_LOGIN=SEU_LOGIN_TRUCKS
-TRUCKS_API_PASSWORD=SUA_SENHA_TRUCKS
+APP_ENCRYPTION_KEY=UMA_CHAVE_GRANDE_E_SECRETA
 TRUCKS_MENSAGEM_MID=148725040945
 TRUCKS_TELEMETRIA_TID=1
 TRUCKS_TELEMETRIA_DIAS_ATRAS=1
@@ -28,7 +26,7 @@ TRUCKS_OCORRENCIAS_INTERVAL=86400
 
 Depois do deploy, abra o Console do servico no Easypanel e execute:
 
-python trucks_postgres_ingest.py --init-db
+python trucks_postgres_ingest.py --init-db --schema trucks
 
 5. Deixe o servico rodando.
 
@@ -41,3 +39,4 @@ python trucks_postgres_ingest.py --loop --sleep 60
 - Este projeto e um worker, nao um site. Nao precisa configurar dominio nem porta/proxy.
 - Use apenas uma replica, para evitar dois workers importando os mesmos dados ao mesmo tempo.
 - Acompanhe a execucao pela aba Logs do Easypanel.
+- As credenciais da Trucks sao cadastradas no painel web e salvas em public.integration_credentials.

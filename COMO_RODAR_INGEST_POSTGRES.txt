@@ -9,7 +9,7 @@ Arquivos criados:
 
 1. Instalar dependencias
 
-pip install -r postgres_ingest/requirements-postgres-ingest.txt
+pip install -r requirements-postgres-ingest.txt
 
 2. Configurar variaveis de ambiente
 
@@ -18,22 +18,23 @@ Use .env.postgres.example como referencia.
 Variaveis obrigatorias:
 
 - POSTGRES_DSN
-- TRUCKS_API_LOGIN
-- TRUCKS_API_PASSWORD
+- APP_ENCRYPTION_KEY
 
 Exemplo PowerShell:
 
 $env:POSTGRES_DSN="postgresql://usuario:senha@localhost:5432/seu_banco"
-$env:TRUCKS_API_LOGIN="seu_login"
-$env:TRUCKS_API_PASSWORD="sua_senha"
+$env:APP_ENCRYPTION_KEY="uma-chave-grande-e-secreta"
+
+As credenciais da Trucks nao ficam mais no .env.
+Elas sao cadastradas pela tela do sistema e salvas em public.integration_credentials.
 
 3. Criar schema e tabelas
 
-python postgres_ingest/trucks_postgres_ingest.py --init-db
+python trucks_postgres_ingest.py --init-db --schema trucks
 
 Tambem da para rodar o SQL manualmente pelo PostgreSQL:
 
-psql "postgresql://usuario:senha@localhost:5432/seu_banco" -f postgres_ingest/schema.sql
+psql "postgresql://usuario:senha@localhost:5432/seu_banco" -f schema.sql
 
 Observacao:
 
@@ -60,18 +61,22 @@ Isso cria:
 
 4. Rodar uma vez
 
-python postgres_ingest/trucks_postgres_ingest.py --once
+python trucks_postgres_ingest.py --once
 
 Rodar apenas um job:
 
-python postgres_ingest/trucks_postgres_ingest.py --once --job mensagens_cb
-python postgres_ingest/trucks_postgres_ingest.py --once --job veiculos
-python postgres_ingest/trucks_postgres_ingest.py --once --job ocorrencias_telemetria
-python postgres_ingest/trucks_postgres_ingest.py --once --job telemetria_relatorio
+python trucks_postgres_ingest.py --once --job mensagens_cb
+python trucks_postgres_ingest.py --once --job veiculos
+python trucks_postgres_ingest.py --once --job ocorrencias_telemetria
+python trucks_postgres_ingest.py --once --job telemetria_relatorio
+
+Rodar apenas um cliente:
+
+python trucks_postgres_ingest.py --once --client trucks
 
 5. Rodar continuamente
 
-python postgres_ingest/trucks_postgres_ingest.py --loop --sleep 60
+python trucks_postgres_ingest.py --loop --sleep 60
 
 6. Como funciona o controle
 

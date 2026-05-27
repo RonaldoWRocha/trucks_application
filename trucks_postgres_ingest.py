@@ -12,10 +12,8 @@ from xml.etree import ElementTree as ET
 
 load_dotenv()
 
-API_URL = os.getenv("TRUCKS_API_URL", "https://webservice.newrastreamentoonline.com.br/")
-API_LOGIN = os.getenv("TRUCKS_API_LOGIN")
-API_PASSWORD = os.getenv("TRUCKS_API_PASSWORD")
 POSTGRES_DSN = os.getenv("POSTGRES_DSN")
+APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY")
 
 JOBS = {
     "veiculos": {
@@ -40,23 +38,10 @@ JOBS = {
     },
 }
 
-FINAL_TABLES = {
-    "veiculos": "trucks.veiculos",
-    "telemetria_relatorio": "trucks.telemetria_relatorio",
-    "mensagens_cb": "trucks.mensagens_cb",
-    "ocorrencias_telemetria": "trucks.ocorrencias_telemetria",
-}
-
-
 def require_env(include_api=True) -> None:
     required = {"POSTGRES_DSN": POSTGRES_DSN}
     if include_api:
-        required.update(
-            {
-                "TRUCKS_API_LOGIN": API_LOGIN,
-                "TRUCKS_API_PASSWORD": API_PASSWORD,
-            }
-        )
+        required.update({"APP_ENCRYPTION_KEY": APP_ENCRYPTION_KEY})
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise RuntimeError(f"Variaveis de ambiente ausentes: {', '.join(missing)}")
@@ -67,6 +52,54 @@ def connect(include_api=True):
     import psycopg
 
     return psycopg.connect(POSTGRES_DSN)
+
+
+def quote_ident(value):
+    import re
+
+    if not re.match(r"^[a-z][a-z0-9_]*$", value or ""):
+        raise RuntimeError(f"Schema invalido: {value}")
+    return f'"{value}"'
+
+
+def active_clients(conn, only_client=None):
+    with conn.cursor() as cur:
+        params = []
+        where = ["c.enabled = true", "ic.enabled = true", "ic.provider = 'trucks'"]
+        if only_client:
+            params.append(only_client)
+            where.append("(c.slug = %s or c.schema_name = %s)")
+            params.append(only_client)
+        cur.execute(
+            f"""
+            SELECT
+                c.id,
+                c.name,
+                c.slug,
+                c.schema_name,
+                ic.api_url,
+                ic.login,
+                pgp_sym_decrypt(decode(ic.password_encrypted, 'base64'), %s) as password
+            FROM public.clients c
+            JOIN public.integration_credentials ic ON ic.client_id = c.id
+            WHERE {' AND '.join(where)}
+            ORDER BY c.id
+            """,
+            [APP_ENCRYPTION_KEY, *params],
+        )
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "schema_name": row[3],
+                "schema": quote_ident(row[3]),
+                "api_url": row[4],
+                "login": row[5],
+                "password": row[6],
+            }
+            for row in cur.fetchall()
+        ]
 
 
 def text_of(node, tag):
@@ -117,11 +150,11 @@ def to_datetime(value):
         return None
 
 
-def xml_request(request_type, additional_xml):
+def xml_request(request_type, additional_xml, login, password):
     return f"""
 <{request_type}>
-    <login>{API_LOGIN}</login>
-    <senha>{API_PASSWORD}</senha>
+    <login>{login}</login>
+    <senha>{password}</senha>
     {additional_xml}
 </{request_type}>
 """.strip()
@@ -140,32 +173,35 @@ def unpack_response(content):
     return [content.decode("utf-8-sig", errors="replace")]
 
 
-def init_db(conn):
+def init_db(conn, schema_name="trucks"):
+    schema = quote_ident(schema_name)
     schema_path = Path(__file__).with_name("schema.sql")
     schema_sql = schema_path.read_text(encoding="utf-8")
+    schema_sql = schema_sql.replace("CREATE SCHEMA IF NOT EXISTS trucks;", f"CREATE SCHEMA IF NOT EXISTS {schema};")
+    schema_sql = schema_sql.replace("trucks.", f"{schema}.")
     with conn.cursor() as cur:
         cur.execute(schema_sql)
         for job_name, config in JOBS.items():
             cur.execute(
                 """
-                INSERT INTO trucks.integration_jobs (job_name, request_type, interval_seconds)
+                INSERT INTO {schema}.integration_jobs (job_name, request_type, interval_seconds)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (job_name) DO UPDATE SET
                     request_type = EXCLUDED.request_type,
                     interval_seconds = EXCLUDED.interval_seconds,
                     updated_at = now()
-                """,
+                """.format(schema=schema),
                 (job_name, config["request_type"], config["interval_seconds"]),
             )
     conn.commit()
 
 
-def enqueue_payload(conn, job_name, http_status, payload):
+def enqueue_payload(conn, schema, job_name, http_status, payload):
     source_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            INSERT INTO trucks.{job_name}_temp (source_hash, http_status, payload, payload_size)
+            INSERT INTO {schema}.{job_name}_temp (source_hash, http_status, payload, payload_size)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (source_hash) DO NOTHING
             RETURNING id
@@ -176,13 +212,13 @@ def enqueue_payload(conn, job_name, http_status, payload):
     return source_hash, inserted
 
 
-def fetch_job(conn, job_name):
+def fetch_job(conn, client, job_name):
     import requests
 
     config = JOBS[job_name]
-    body = xml_request(config["request_type"], config["additional_xml"])
+    body = xml_request(config["request_type"], config["additional_xml"], client["login"], client["password"])
     response = requests.post(
-        API_URL,
+        client["api_url"],
         data=body.encode("utf-8"),
         headers={"Content-Type": "application/xml"},
         timeout=60,
@@ -191,7 +227,7 @@ def fetch_job(conn, job_name):
 
     new_payloads = 0
     for payload in payloads:
-        source_hash, inserted = enqueue_payload(conn, job_name, response.status_code, payload)
+        source_hash, inserted = enqueue_payload(conn, client["schema"], job_name, response.status_code, payload)
         if inserted:
             new_payloads += 1
         if "<ErrorRequest>" in payload:
@@ -201,12 +237,12 @@ def fetch_job(conn, job_name):
     return new_payloads
 
 
-def process_pending(conn, job_name, limit=20):
+def process_pending(conn, schema, job_name, limit=20):
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT id, source_hash, requested_at, http_status, payload, payload_size
-            FROM trucks.{job_name}_temp
+            FROM {schema}.{job_name}_temp
             WHERE status IN ('pending', 'error')
             ORDER BY created_at
             LIMIT %s
@@ -219,10 +255,11 @@ def process_pending(conn, job_name, limit=20):
     for row in rows:
         temp_id, source_hash, requested_at, http_status, payload, payload_size = row
         try:
-            read_count, inserted_count = process_payload(conn, job_name, payload, source_hash)
+            read_count, inserted_count = process_payload(conn, schema, job_name, payload, source_hash)
             ignored_count = max(read_count - inserted_count, 0)
             move_to_importados(
                 conn,
+                schema,
                 job_name,
                 temp_id,
                 source_hash,
@@ -240,21 +277,21 @@ def process_pending(conn, job_name, limit=20):
             totals["ignored"] += ignored_count
         except Exception as exc:
             conn.rollback()
-            mark_temp_error(conn, job_name, temp_id, source_hash, str(exc))
+            mark_temp_error(conn, schema, job_name, temp_id, source_hash, str(exc))
             conn.commit()
     return totals
 
 
-def process_payload(conn, job_name, payload, source_hash):
+def process_payload(conn, schema, job_name, payload, source_hash):
     root = ET.fromstring(payload)
     if job_name == "veiculos":
-        return insert_veiculos(conn, root, source_hash)
+        return insert_veiculos(conn, schema, root, source_hash)
     if job_name == "mensagens_cb":
-        return insert_mensagens_cb(conn, root, source_hash)
+        return insert_mensagens_cb(conn, schema, root, source_hash)
     if job_name == "ocorrencias_telemetria":
-        return insert_ocorrencias(conn, root, source_hash)
+        return insert_ocorrencias(conn, schema, root, source_hash)
     if job_name == "telemetria_relatorio":
-        return insert_telemetria_relatorio(conn, root, source_hash)
+        return insert_telemetria_relatorio(conn, schema, root, source_hash)
     raise ValueError(f"Job desconhecido: {job_name}")
 
 
@@ -262,11 +299,11 @@ def rowcount_after_execute(cur):
     return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
 
-def insert_veiculos(conn, root, source_hash):
+def insert_veiculos(conn, schema, root, source_hash):
     read_count = 0
     inserted_count = 0
     sql = """
-        INSERT INTO trucks.veiculos (
+        INSERT INTO {schema}.veiculos (
             veiculo_id, placa, versao_comp_bordo, sensor_temp1, sensor_temp2, sensor_temp3,
             tempo_reenvio_comando, teclado_macro, permissao_envio_comando, temporizador_padrao,
             temporizador_satelital_atual, tipo_equipamento, nome_motorista, proprietario,
@@ -290,7 +327,7 @@ def insert_veiculos(conn, root, source_hash):
             source_hash = EXCLUDED.source_hash,
             updated_at = now()
         RETURNING (xmax = 0) AS inserted
-    """
+    """.format(schema=schema)
     with conn.cursor() as cur:
         for veiculo in root.findall("Veiculo"):
             read_count += 1
@@ -332,11 +369,11 @@ def insert_veiculos(conn, root, source_hash):
     return read_count, inserted_count
 
 
-def insert_mensagens_cb(conn, root, source_hash):
+def insert_mensagens_cb(conn, schema, root, source_hash):
     read_count = 0
     inserted_count = 0
     sql = """
-        INSERT INTO trucks.mensagens_cb (
+        INSERT INTO {schema}.mensagens_cb (
             mensagem_id, veiculo_id, data_hora, latitude, longitude, municipio, uf,
             rodovia, rua, velocidade, evt2_sirene_acionada, evt3_veiculo_bloqueado,
             evt4_ignicao_acionada, evt12_porta_carona_aberta, evt13_porta_motorista_aberta,
@@ -348,7 +385,7 @@ def insert_mensagens_cb(conn, root, source_hash):
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (mensagem_id) DO NOTHING
-    """
+    """.format(schema=schema)
     with conn.cursor() as cur:
         for mensagem in root.findall("MensagemCB"):
             read_count += 1
@@ -386,11 +423,11 @@ def insert_mensagens_cb(conn, root, source_hash):
     return read_count, inserted_count
 
 
-def insert_ocorrencias(conn, root, source_hash):
+def insert_ocorrencias(conn, schema, root, source_hash):
     read_count = 0
     inserted_count = 0
     sql = """
-        INSERT INTO trucks.ocorrencias_telemetria (
+        INSERT INTO {schema}.ocorrencias_telemetria (
             veiculo_id, data_hora, velocidade, rpm, velocidade_max,
             porcentagem_tanque, source_hash
         )
@@ -398,7 +435,7 @@ def insert_ocorrencias(conn, root, source_hash):
         ON CONFLICT (
             veiculo_id, data_hora, velocidade, rpm, velocidade_max, porcentagem_tanque
         ) DO NOTHING
-    """
+    """.format(schema=schema)
     with conn.cursor() as cur:
         for ocorrencia in root.findall("Ocorrencia"):
             read_count += 1
@@ -418,12 +455,12 @@ def insert_ocorrencias(conn, root, source_hash):
     return read_count, inserted_count
 
 
-def insert_telemetria_relatorio(conn, root, source_hash):
+def insert_telemetria_relatorio(conn, schema, root, source_hash):
     read_count = 0
     inserted_count = 0
     data_referencia = date.today() - timedelta(days=int(os.getenv("TRUCKS_TELEMETRIA_DIAS_ATRAS", "1")))
     sql = """
-        INSERT INTO trucks.telemetria_relatorio (
+        INSERT INTO {schema}.telemetria_relatorio (
             veiculo_id, data_referencia, distancia, velocidade_media, velocidade_max,
             hora_ini, hora_fim, utilizacao, hodometro_ini, hodometro_fim,
             media_consumo, consumo_hora_motor, rpm_medio, rpm_max, temperatura_media,
@@ -452,7 +489,7 @@ def insert_telemetria_relatorio(conn, root, source_hash):
             source_hash = EXCLUDED.source_hash,
             updated_at = now()
         RETURNING (xmax = 0) AS inserted
-    """
+    """.format(schema=schema)
     with conn.cursor() as cur:
         for relatorio in root.findall("Relatorio"):
             read_count += 1
@@ -487,6 +524,7 @@ def insert_telemetria_relatorio(conn, root, source_hash):
 
 def move_to_importados(
     conn,
+    schema,
     job_name,
     temp_id,
     source_hash,
@@ -501,7 +539,7 @@ def move_to_importados(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            INSERT INTO trucks.{job_name}_importados (
+            INSERT INTO {schema}.{job_name}_importados (
                 source_hash, requested_at, http_status, payload, payload_size,
                 records_read, records_inserted, records_ignored
             )
@@ -519,14 +557,14 @@ def move_to_importados(
                 records_ignored,
             ),
         )
-        cur.execute(f"DELETE FROM trucks.{job_name}_temp WHERE id = %s", (temp_id,))
+        cur.execute(f"DELETE FROM {schema}.{job_name}_temp WHERE id = %s", (temp_id,))
 
 
-def mark_temp_error(conn, job_name, temp_id, source_hash, error_message):
+def mark_temp_error(conn, schema, job_name, temp_id, source_hash, error_message):
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            UPDATE trucks.{job_name}_temp
+            UPDATE {schema}.{job_name}_temp
             SET status = 'error',
                 attempts = attempts + 1,
                 last_error = %s,
@@ -536,22 +574,22 @@ def mark_temp_error(conn, job_name, temp_id, source_hash, error_message):
             (error_message[:2000], temp_id),
         )
         cur.execute(
-            """
-            INSERT INTO trucks.integration_errors (job_name, stage, error_message, source_hash)
+            f"""
+            INSERT INTO {schema}.integration_errors (job_name, stage, error_message, source_hash)
             VALUES (%s, %s, %s, %s)
             """,
             (job_name, "parse_import", error_message[:2000], source_hash),
         )
 
 
-def due_jobs(conn, only_job=None):
+def due_jobs(conn, schema, only_job=None):
     if only_job:
         return [only_job]
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT job_name
-            FROM trucks.integration_jobs
+            FROM {schema}.integration_jobs
             WHERE enabled = true
               AND next_run_at <= now()
             ORDER BY next_run_at
@@ -560,11 +598,11 @@ def due_jobs(conn, only_job=None):
         return [row[0] for row in cur.fetchall()]
 
 
-def update_job_success(conn, job_name, totals):
+def update_job_success(conn, schema, job_name, totals):
     with conn.cursor() as cur:
         cur.execute(
-            """
-            UPDATE trucks.integration_jobs
+            f"""
+            UPDATE {schema}.integration_jobs
             SET last_success_at = now(),
                 last_status = 'success',
                 last_error_message = NULL,
@@ -578,11 +616,11 @@ def update_job_success(conn, job_name, totals):
         )
 
 
-def update_job_error(conn, job_name, error_message):
+def update_job_error(conn, schema, job_name, error_message):
     with conn.cursor() as cur:
         cur.execute(
-            """
-            UPDATE trucks.integration_jobs
+            f"""
+            UPDATE {schema}.integration_jobs
             SET last_error_at = now(),
                 last_status = 'error',
                 last_error_message = %s,
@@ -593,33 +631,39 @@ def update_job_error(conn, job_name, error_message):
             (error_message[:2000], job_name),
         )
         cur.execute(
-            """
-            INSERT INTO trucks.integration_errors (job_name, stage, error_message)
+            f"""
+            INSERT INTO {schema}.integration_errors (job_name, stage, error_message)
             VALUES (%s, %s, %s)
             """,
             (job_name, "fetch_job", error_message[:2000]),
         )
 
 
-def run_once(conn, only_job=None):
-    jobs = due_jobs(conn, only_job)
-    if not jobs:
+def run_once(conn, only_job=None, only_client=None):
+    clients = active_clients(conn, only_client)
+    if not clients:
+        print("Nenhum cliente com credenciais Trucks ativas.")
         return
-    for job_name in jobs:
-        try:
-            fetch_job(conn, job_name)
-            totals = process_pending(conn, job_name)
-            update_job_success(conn, job_name, totals)
-            conn.commit()
-            print(
-                f"{job_name}: lidos={totals['read']} "
-                f"inseridos={totals['inserted']} ignorados={totals['ignored']}"
-            )
-        except Exception as exc:
-            conn.rollback()
-            update_job_error(conn, job_name, str(exc))
-            conn.commit()
-            print(f"{job_name}: erro={exc}")
+    for client in clients:
+        schema = client["schema"]
+        jobs = due_jobs(conn, schema, only_job)
+        if not jobs:
+            continue
+        for job_name in jobs:
+            try:
+                fetch_job(conn, client, job_name)
+                totals = process_pending(conn, schema, job_name)
+                update_job_success(conn, schema, job_name, totals)
+                conn.commit()
+                print(
+                    f"{client['slug']}/{job_name}: lidos={totals['read']} "
+                    f"inseridos={totals['inserted']} ignorados={totals['ignored']}"
+                )
+            except Exception as exc:
+                conn.rollback()
+                update_job_error(conn, schema, job_name, str(exc))
+                conn.commit()
+                print(f"{client['slug']}/{job_name}: erro={exc}")
 
 
 def main():
@@ -628,19 +672,21 @@ def main():
     parser.add_argument("--once", action="store_true", help="Executa uma rodada")
     parser.add_argument("--loop", action="store_true", help="Executa em loop")
     parser.add_argument("--job", choices=sorted(JOBS), help="Executa apenas um job")
+    parser.add_argument("--client", help="Executa apenas um cliente pelo slug ou schema")
+    parser.add_argument("--schema", default="trucks", help="Schema usado com --init-db")
     parser.add_argument("--sleep", type=int, default=60, help="Pausa do loop em segundos")
     args = parser.parse_args()
 
     with connect(include_api=not args.init_db or args.once or args.loop) as conn:
         if args.init_db:
-            init_db(conn)
-            print("Schema/tabelas criados ou atualizados.")
+            init_db(conn, args.schema)
+            print(f"Schema/tabelas criados ou atualizados em {args.schema}.")
         if args.loop:
             while True:
-                run_once(conn, args.job)
+                run_once(conn, args.job, args.client)
                 time.sleep(args.sleep)
         elif args.once or not args.init_db:
-            run_once(conn, args.job)
+            run_once(conn, args.job, args.client)
 
 
 if __name__ == "__main__":
