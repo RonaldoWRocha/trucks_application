@@ -24,6 +24,7 @@ Exemplo PowerShell:
 
 $env:POSTGRES_DSN="postgresql://usuario:senha@localhost:5432/seu_banco"
 $env:APP_ENCRYPTION_KEY="uma-chave-grande-e-secreta"
+$env:TRUCKS_WORKER_CONCURRENCY="3"
 
 As credenciais da Trucks nao ficam mais no .env.
 Elas sao cadastradas pela tela do sistema e salvas em public.integration_credentials.
@@ -77,6 +78,13 @@ python trucks_postgres_ingest.py --once --client trucks
 5. Rodar continuamente
 
 python trucks_postgres_ingest.py --loop --sleep 60
+
+Para processar varios clientes em paralelo, configure:
+
+TRUCKS_WORKER_CONCURRENCY=3
+
+O padrao e 1, que mantem o comportamento sequencial.
+Quando usar --client, o worker processa apenas aquele cliente.
 
 6. Como funciona o controle
 

@@ -4,6 +4,7 @@ import io
 import os
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -14,6 +15,7 @@ load_dotenv()
 
 POSTGRES_DSN = os.getenv("POSTGRES_DSN")
 APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY")
+WORKER_CONCURRENCY = max(1, int(os.getenv("TRUCKS_WORKER_CONCURRENCY", "1")))
 
 JOBS = {
     "veiculos": {
@@ -664,23 +666,21 @@ def update_job_error(conn, schema, job_name, error_message):
         )
 
 
-def run_once(conn, only_job=None, only_client=None):
-    clients = active_clients(conn, only_client)
-    if not clients:
-        print("Nenhum cliente com credenciais Trucks ativas.")
-        return
-    for client in clients:
+def process_client(client, only_job=None):
+    with connect(include_api=True) as conn:
         schema = client["schema"]
         jobs = due_jobs(conn, schema, only_job)
         if not jobs:
-            continue
+            return [f"{client['slug']}: nenhum job vencido"]
+
+        messages = []
         for job_name in jobs:
             try:
                 fetch_job(conn, client, job_name)
                 totals = process_pending(conn, schema, job_name)
                 update_job_success(conn, schema, job_name, totals)
                 conn.commit()
-                print(
+                messages.append(
                     f"{client['slug']}/{job_name}: lidos={totals['read']} "
                     f"inseridos={totals['inserted']} ignorados={totals['ignored']}"
                 )
@@ -688,7 +688,33 @@ def run_once(conn, only_job=None, only_client=None):
                 conn.rollback()
                 update_job_error(conn, schema, job_name, str(exc))
                 conn.commit()
-                print(f"{client['slug']}/{job_name}: erro={exc}")
+                messages.append(f"{client['slug']}/{job_name}: erro={exc}")
+        return messages
+
+
+def run_once(conn, only_job=None, only_client=None):
+    clients = active_clients(conn, only_client)
+    if not clients:
+        print("Nenhum cliente com credenciais Trucks ativas.")
+        return
+
+    concurrency = 1 if only_client else min(WORKER_CONCURRENCY, len(clients))
+    if concurrency <= 1:
+        for client in clients:
+            for message in process_client(client, only_job):
+                print(message)
+        return
+
+    print(f"Processando {len(clients)} clientes com concorrencia={concurrency}")
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(process_client, client, only_job): client for client in clients}
+        for future in as_completed(futures):
+            client = futures[future]
+            try:
+                for message in future.result():
+                    print(message)
+            except Exception as exc:
+                print(f"{client['slug']}: erro geral={exc}")
 
 
 def main():
