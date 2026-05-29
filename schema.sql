@@ -75,6 +75,42 @@ ON trucks.veiculos (veiculo_id);
 CREATE INDEX IF NOT EXISTS idx_veiculos_placa
 ON trucks.veiculos (placa);
 
+CREATE TABLE IF NOT EXISTS trucks.motoristas (
+    id bigserial PRIMARY KEY,
+    name text NOT NULL,
+    cpf text,
+    rg text,
+    birth_date date,
+    phone text,
+    email text,
+    cnh_number text,
+    cnh_category text,
+    cnh_expires_at date,
+    mopp_expires_at date,
+    admission_date date,
+    contract_type text,
+    registration_number text,
+    status text NOT NULL DEFAULT 'ativo',
+    assigned_vehicle_plate text,
+    base text,
+    address text,
+    emergency_contact_name text,
+    emergency_contact_phone text,
+    notes text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_motoristas_cpf
+ON trucks.motoristas (cpf)
+WHERE cpf IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_motoristas_name
+ON trucks.motoristas (name);
+
+CREATE INDEX IF NOT EXISTS idx_motoristas_status
+ON trucks.motoristas (status);
+
 CREATE TABLE IF NOT EXISTS trucks.mensagens_cb (
     id bigserial PRIMARY KEY,
     mensagem_id bigint NOT NULL,
